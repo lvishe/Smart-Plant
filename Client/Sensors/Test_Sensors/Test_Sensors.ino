@@ -2,39 +2,42 @@
 #include "../ATH10_Sensor.h"
 #include "../Moisture_sensor.h" 
 #include "../Ph_Sensor.h"
-
+ 
 // 1. Define Sensors
 AHT10Sensor    airTemp(AHTMode::TEMPERATURE);
 AHT10Sensor    airHum(AHTMode::HUMIDITY);
-TDSSensor      waterTDS(27, 3.3, 4096.0); // ESP32 Settings
-PHSensor       waterPH(35, 3.3, 4096.0);  // ESP32 Settings
+PHSensor       ph(1);
+TDSSensor      tds(0);
+MoistureSensor m(4);
 
 // 2. Create the list
-Sensor* mySensors[] = {
+Sensor* mySensors[] = 
+{
     &airTemp,
     &airHum,
-    &waterTDS,
-    &waterPH
+    &tds,
+    &ph,
+    &m,
 };
 
 const int sensorCount = sizeof(mySensors) / sizeof(mySensors[0]);
 
-void setup() {
+void setup() 
+ {
     Serial.begin(115200);
+    Wire.begin(21,22);
     
-    // Link TDS to Temp for compensation
-    waterTDS.setTemperatureSource(&airTemp);
+    airTemp.init();
+    airHum.init();
 
-    // Optional: Calibrate pH if you know your probe's specific offset
-    // waterPH.calibrate(3.48, 0.175); 
-
-    Serial.println("Multisensor System Online");
+    Serial.println("System Online");
 }
 
 void loop() {
     Serial.println("\n--- Measurements ---");
 
-    for (int i = 0; i < sensorCount; i++) {
+    for (int i = 0; i < sensorCount; i++)
+     {
         float val = mySensors[i]->read_value();
         
         Serial.print(mySensors[i]->getName());
