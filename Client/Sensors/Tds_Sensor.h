@@ -10,7 +10,7 @@ class TDSSensor : public Sensor
         float _vref, _adcRange;
         Sensor* _tempSource = nullptr;
 
-
+        
     public:
         TDSSensor(int pin, float vref = 3.3, float adcRange = 4096.0);
 

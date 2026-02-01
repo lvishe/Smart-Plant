@@ -1,6 +1,6 @@
 #include "Ph_Sensor.h"
 
-PHSensor::PHSensor(int pin, float vref = 3.3, float adcRange = 4096.0) 
+PHSensor::PHSensor(int pin, float vref, float adcRange) 
     : Sensor("PH_Meter", pin), _vref(vref), _adcRange(adcRange)
 {
     pinMode(_pin, INPUT);
