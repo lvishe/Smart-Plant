@@ -1,34 +1,32 @@
-#include "Server.h"
+#include "LServer.h"
 
-Lserver comm;
+Lserver server;
 
-void setup()
-{
-  Serial.begin(115200);
-  comm.startAP();
+void setup() {
+    Serial.begin(115200);
+    server.startAP();
 }
 
-void loop()
-{
-  // Check for new connections
-  comm.acceptClient();
+ int nextDelay = 1000;
+ 
+void loop() {
+    // Check for new client
+    if (server.acceptClient()) {
+        // New connection handled
+    }
 
-  Opcode op;
-  String msg;
+    Opcode code;
+    String data;
+   
+    // 1. Check for incoming packet
+    if (server.receivePacket(code, data)) {
+        Serial.println("Received DATA: " + data);
 
-  // Process incoming messages
-  if (comm.receive(op, msg))
-  {
-      if (op == Opcode::DATA)
-      {
-          Serial.print("Received DATA: ");
-          Serial.println(msg);
+        nextDelay++;
 
-          if (msg.indexOf("101.3") >= 0) 
-          {
-             Serial.println("High value detected, sending UPDATE to slow down client...");
-             comm.sendUpdate(2000); // Set delay to 2000ms
-          }
-      }
-  }
+        // 3. Send the UPDATE packet
+        if (server.sendUpdate(nextDelay)) {
+            Serial.println("Sent Update: " + String(nextDelay));
+        }
+    }
 }

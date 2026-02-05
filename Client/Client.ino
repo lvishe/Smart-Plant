@@ -1,34 +1,55 @@
-#include "Client.h"
+#include "LClient.h"
 
+// Global objects and variables
 Lclient comm;
-int loopDelay = 500; // Start with 500ms
+int loopDelay = 2000; // Default delay (2 seconds)
 
-void setup()
-{
-  Serial.begin(115200);
-  comm.startSTA();
+void setup() {
+    Serial.begin(115200);
+    
+    // Connect to the Server's Access Point
+    Serial.println("Starting Client...");
+    comm.startSTA(); 
 }
 
-void loop()
-{
-  // 1. Prepare Data
-  float sensorData[5] = {23.5, 50.2, 101.3, 12.7, 75.0};
-  String message = "";
-  for (int i = 0; i < 5; i++) {
-      message += String(sensorData[i], 2);
-      if (i < 4) message += ",";
-  }
+void loop() {
+    // 1. Prepare the sensor data string
+    // In a real scenario, read your actual sensors here
+    float temp = 23.5;
+    float humidity = 50.2;
+    float soilMoisture = 101.3; // Example value that triggers server logic
+    
+    String sensorMsg = String(temp, 1) + "," + String(humidity, 1) + "," + String(soilMoisture, 1);
 
-  Serial.print("Sending: ");
-  Serial.println(message);
+    // 2. Send the data as ONE packet
+    Serial.print("Sending sensor data: ");
+    Serial.println(sensorMsg);
+    
+    if (comm.sendPacket(sensorMsg, Opcode::DATA)) {
+        Serial.println("Packet sent successfully.");
+    } else {
+        Serial.println("Failed to send packet (Server disconnected?)");
+    }
 
-  // 2. Perform Transaction: Send DATA -> Wait -> Receive UPDATE
-  // The function parses the response internally using switch case
-  loopDelay = comm.performTransaction(message, loopDelay);
+    // 3. Try to receive a response (UPDATE) from the server
+    Opcode incomingOp;
+    String incomingStr;
+    int incomingInt = 0;
 
-  Serial.print("Server requested delay: ");
-  Serial.println(loopDelay);
+    // We check for a response. This is non-blocking if no data is there.
+    if (comm.receivePacket(incomingOp, incomingStr, incomingInt)) {
+        if (incomingOp == Opcode::UPDATE) {
+            loopDelay = incomingInt; // Update our global delay
+            Serial.print(">>> Server command: New loop delay set to ");
+            Serial.print(loopDelay);
+            Serial.println("ms");
+        } else if (incomingOp == Opcode::DATA) {
+            Serial.print(">>> Server message: ");
+            Serial.println(incomingStr);
+        }
+    }
 
-  // 3. Wait the requested amount
-  delay(loopDelay);
+    // 4. Wait for the specified interval
+    Serial.println("-----------------------------------");
+    delay(loopDelay);
 }
