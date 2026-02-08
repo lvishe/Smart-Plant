@@ -1,7 +1,8 @@
 #include "LServer.h"
-#include <Arduino.h> // Provides Serial, millis, etc.
+#include <Arduino.h>
 
-void Lserver::startAP() {
+void Lserver::startAP() 
+{
     WiFi.mode(WIFI_AP);
     WiFi.softAP("ESP32_AP", "12345678");
     _server.begin();
@@ -9,20 +10,30 @@ void Lserver::startAP() {
     Serial.println(WiFi.softAPIP());
 }
 
-bool Lserver::acceptClient() {
-    if (!_client || !_client.connected()) {
+bool Lserver::acceptClient() 
+{
+    if (!_client || !_client.connected()) 
+    {
         WiFiClient newClient = _server.available();
-        if (newClient) {
+        if (newClient) 
+        {
             _client = newClient;
-            Serial.println("New Client Connected");
-            return true;
+             return true;
         }
     }
     return false;
 }
 
-bool Lserver::receivePacket(Opcode &codeOut, String &strOut) {
-    if (!_client.connected() || _client.available() < sizeof(Message)) return false;
+// Updated to include String &fromIP
+bool Lserver::receivePacket(Opcode &codeOut, String &strOut, String &fromIP) 
+{
+    if (!_client.connected() || _client.available() < sizeof(Message)) 
+    {
+        return false;
+    }
+
+    // Capture the IP address of the sender
+    fromIP = _client.remoteIP().toString();
 
     // 1. Read the Header
     Message header;
@@ -31,8 +42,12 @@ bool Lserver::receivePacket(Opcode &codeOut, String &strOut) {
 
     // 2. Wait for Payload
     unsigned long start = millis();
-    while (_client.available() < header.data_lenght) {
-        if (millis() - start > 1000) return false;
+    while (_client.available() < header.data_lenght) 
+    {
+        if (millis() - start > 1000) 
+        {
+            return false;
+        }
     }
 
     // 3. Read the Data
@@ -45,8 +60,12 @@ bool Lserver::receivePacket(Opcode &codeOut, String &strOut) {
     return true;
 }
 
-bool Lserver::sendUpdate(int newDelay) {
-    if (!_client.connected()) return false;
+bool Lserver::sendUpdate(int newDelay) 
+{
+    if (!_client.connected()) 
+    {
+        return false;
+    }
 
     // 1. Prepare Header
     Message header;

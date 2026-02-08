@@ -19,7 +19,7 @@ public:
     bool acceptClient();
     
     // Public so Server.ino can use them
-    bool receivePacket(Opcode &codeOut, String &strOut);
+    bool receivePacket(Opcode &codeOut, String &strOut, String &fromIP);
     bool sendUpdate(int newDelay);
 };
 

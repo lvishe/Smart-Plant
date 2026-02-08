@@ -32,7 +32,7 @@ void setup()
     airTemp.init();
     airHum.init();
 
-    Serial.println("System Online");
+        Serial.println("System Online");
 }
 
 void loop() {
