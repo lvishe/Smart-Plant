@@ -2,8 +2,7 @@
 #include <Arduino.h>
 
 void Lserver::startAP() 
-{
-    WiFi.mode(WIFI_AP);
+{   
     WiFi.softAP("ESP32_AP", "12345678");
     _server.begin();
     Serial.print("Server IP: ");
@@ -18,9 +17,10 @@ bool Lserver::acceptClient()
         if (newClient) 
         {
             _client = newClient;
-             return true;
+            return true;
         }
     }
+   
     return false;
 }
 

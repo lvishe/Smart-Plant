@@ -1,14 +1,16 @@
 #ifndef PROTOCOL_H
 #define PROTOCOL_H
 
-enum class Opcode : int {
+enum class Opcode : int
+{
     DATA = 0, 
     UPDATE
 };
 
-struct Message {
+struct Message 
+{
     Opcode code;
-    int data_lenght; // Matches your file's spelling
+    int data_lenght;
 };
 
 #endif

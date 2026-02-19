@@ -31,8 +31,8 @@ void setup()
     Serial.begin(115200);
     Wire.begin(21, 22);
     
-    airTemp.init();
-    airHum.init();
+    //airTemp.init();
+    //airHum.init();
 
     Serial.println("System Online");
     Serial.println("Starting Client...");
