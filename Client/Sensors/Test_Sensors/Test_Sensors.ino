@@ -2,6 +2,8 @@
 #include "../ATH10_Sensor.h"
 #include "../Moisture_sensor.h" 
 #include "../Ph_Sensor.h"
+
+#define SENSOR_PH_PIN_NUMBER    1
  
 // 1. Define Sensors
 AHT10Sensor    airTemp(AHTMode::TEMPERATURE);
@@ -10,7 +12,7 @@ PHSensor       ph(1);
 TDSSensor      tds(0);
 MoistureSensor m(4);
 
-// 2. Create the list
+
 Sensor* mySensors[] = 
 {
     &airTemp,
@@ -30,7 +32,7 @@ void setup()
     airTemp.init();
     airHum.init();
 
-    Serial.println("System Online");
+        Serial.println("System Online");
 }
 
 void loop() {
@@ -46,9 +48,12 @@ void loop() {
         if (val < -900) {
             Serial.println("Check Connection!");
         } else {
-            Serial.println(val, 2); // Print with 2 decimal places
+            Serial.println(val, 2);
         }
     }
+    
+    time_t previous = 0;
+    tmie_t current = milis();
 
     delay(3000);
 }

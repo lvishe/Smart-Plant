@@ -10,8 +10,17 @@ class MoistureSensor : public Sensor
         int _waterValue; // Calibration value when sensor is in water
 
     public:
-        MoistureSensor(int pin, int airValue = 1023, int waterValue = 0);
-        float read_value() override;
+        MoistureSensor(int pin, int airValue = 1023, int waterValue = 0)
+            : Sensor("SoilMoist", pin), _airValue(airValue), _waterValue(waterValue)
+        {
+            pinMode(_pin, INPUT);
+        }
+
+        float read_value() override
+        {
+            int rawMedian = analogRead(_pin); 
+            return rawMedian;
+        }
 };
 
 #endif
