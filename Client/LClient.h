@@ -2,28 +2,20 @@
 #define LCLIENT_H
 
 #include <WiFi.h>
+#include <WiFiUdp.h>
 #include "protocol.h"
 
 class Lclient {
 private:
-    WiFiClient _client;
+    WiFiUDP _udp;
+    IPAddress _serverIP;
+    int _port;
 
 public:
-    void startSTA();
-    
-<<<<<<< HEAD
-    // Pass the struct directly
+    Lclient(const char* serverIP = "192.168.4.1", int port = 8080);
+    void begin();
     bool sendPacket(ClientMessage &msg);
-    
-    // Read directly into the struct
     bool receivePacket(ServerMessage &msgOut);
-=======
-    // Sends Header + Data in one single buffer
-    bool sendPacket(String& data, Opcode code);
-    
-    // Reads one full packet
-    bool receivePacket(Opcode &codeOut, String &strOut, int &intOut);
->>>>>>> 6aadd463b6d1fff5c24b0226862f0d128d1ccd35
 };
 
 #endif

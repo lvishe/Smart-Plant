@@ -2,31 +2,26 @@
 #define LSERVER_H
 
 #include <WiFi.h>
-#include <WiFiClient.h>
-#include <WiFiServer.h>
+#include <WiFiUdp.h>
 #include "protocol.h"
 
 class Lserver 
 {
 private:
-    WiFiServer _server;
-    WiFiClient _client;
+    WiFiUDP _udp;
+    int _port;
+    
+    IPAddress _lastSenderIP;
+    uint16_t _lastSenderPort;
 
 public:
-    Lserver(int port = 8080) : _server(port) {}
+    Lserver(int port = 8080) : _port(port) {}
     
-    void startAP();
-    bool acceptClient();
-    
-<<<<<<< HEAD
-    // Now we just pass the struct by reference to populate it
+    void begin();
+    // Returns true if a valid packet was received
     bool receivePacket(ClientMessage &msgOut, String &fromIP);
+    // Sends a reply to the last client that sent a packet
     bool sendUpdate(uint32_t newDelay); 
-=======
-    // Public so Server.ino can use them
-    bool receivePacket(Opcode &codeOut, String &strOut, String &fromIP);
-    bool sendUpdate(int newDelay);
->>>>>>> 6aadd463b6d1fff5c24b0226862f0d128d1ccd35
 };
 
 #endif
