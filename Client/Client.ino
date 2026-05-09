@@ -6,7 +6,7 @@ Lclient myClient;
 uint32_t loopDelay = 3000; // Default wait time
 uint32_t myDeviceId = 0;   // Dynamically assigned ID
 
-int num = 40;
+int num = 10;
 
 void setup() {
     Serial.begin(115200);
