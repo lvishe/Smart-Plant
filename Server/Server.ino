@@ -1,30 +1,49 @@
 #include <WiFi.h>
+#include <ESPmDNS.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <DNSServer.h>
-#include <ESPmDNS.h>
 #include <Preferences.h>
 #include <vector>
+
 #include "LServer.h"
 #include "html_pages.h"
 
-// --- MP3 Player Support ---
 #include "DFRobotDFPlayerMini.h"
+
 #define PIN_MP3_TX 5
 #define PIN_MP3_RX 4
-
-DFRobotDFPlayerMini myDFPlayer;
-
-Lserver server;
-AsyncWebServer webServer(80);
-DNSServer dnsServer;
-Preferences preferences;
 
 #define RESET_PREFERENCES_ON_BOOT false
 #define MAX_HISTORY 20
 
-unsigned long lastAlarmTime = 0;
-const unsigned long ALARM_COOLDOWN = 15000;
+/** mDNS: http://plant.local/ on home LAN when STA is connected. */
+#define MDNS_HOSTNAME "plant"
+
+#define AP_SSID "SmartPlant"
+#define AP_PASSWORD "12345678"
+
+#define PREFS_NAMESPACE "wifi-gate"
+
+static const unsigned long kAlarmCooldownMs = 15000;
+static const unsigned long kHistoryJsonRebuildMinMs = 100;
+static const unsigned long kMdnsRetryMs = 30000;
+static const unsigned long kDeviceIdleTimeoutMs = 30000;
+static const unsigned long kAlarmMuteAfterClearMs = 60000;
+static const unsigned long kWifiReconnectIntervalMs = 10000;
+static const unsigned long kIndexRebuildIntervalMs = 10000;
+static const unsigned long kCleanupIntervalMs = 5000;
+
+static const float kNoReading = -999.0f;
+static const float kPrefsNoMax = -9999.0f;
+
+// -----------------------------------------------------------------------------
+
+DFRobotDFPlayerMini myDFPlayer;
+Lserver server;
+AsyncWebServer webServer(80);
+DNSServer dnsServer;
+Preferences preferences;
 
 struct SensorStream
 {
@@ -32,15 +51,15 @@ struct SensorStream
     float values[MAX_HISTORY];
     bool hasMax = false;
     float maxThreshold = 0.0f;
-    
     bool alarmLatched = false;
     bool resetPending = true;
 
-    SensorStream(String n) : name(n)
+    explicit SensorStream(String n)
+        : name(n)
     {
         for (int i = 0; i < MAX_HISTORY; i++)
         {
-            values[i] = -999.0f;
+            values[i] = kNoReading;
         }
     }
 };
@@ -68,24 +87,98 @@ String pass = "";
 
 String cachedIndexHTML = "";
 String cachedHistoryJSON = "{\"devices\":[]}";
-String cachedStatusJSON = "{\"lastData\":\"Waiting...\",\"lastIP\":\"None\"}";
 
 bool pendingSave = false;
 String pendingSsid = "";
 String pendingPass = "";
 bool needsRebuild = false;
 
+unsigned long lastAlarmTime = 0;
+unsigned long lastIndexRebuild = 0;
+unsigned long lastWifiCheck = 0;
+unsigned long lastCleanup = 0;
+
+static bool s_historyJsonDirty = false;
+static unsigned long s_lastHistoryJsonRebuildMs = 0;
+
+static bool s_mdnsActive = false;
+static unsigned long s_mdnsLastBeginAttemptMs = 0;
+
+// -----------------------------------------------------------------------------
+// Forward declarations
+
+void rebuildCaches();
+void rebuildIndex();
+
+// -----------------------------------------------------------------------------
+
+static void updateMdnsForSta()
+{
+    if (WiFi.status() == WL_CONNECTED)
+    {
+        if (s_mdnsActive)
+        {
+            return;
+        }
+
+        unsigned long now = millis();
+        if (s_mdnsLastBeginAttemptMs != 0 && (now - s_mdnsLastBeginAttemptMs) < kMdnsRetryMs)
+        {
+            return;
+        }
+        s_mdnsLastBeginAttemptMs = now;
+
+        if (MDNS.begin(MDNS_HOSTNAME))
+        {
+            MDNS.addService("http", "tcp", 80);
+            s_mdnsActive = true;
+            s_mdnsLastBeginAttemptMs = 0;
+            Serial.printf("mDNS started: http://%s.local/ (STA %s)\n", MDNS_HOSTNAME,
+                          WiFi.localIP().toString().c_str());
+        }
+        else
+        {
+            Serial.println("mDNS: MDNS.begin failed, will retry");
+        }
+    }
+    else
+    {
+        s_mdnsLastBeginAttemptMs = 0;
+        if (s_mdnsActive)
+        {
+            MDNS.end();
+            s_mdnsActive = false;
+            Serial.println("mDNS stopped (STA not connected)");
+        }
+    }
+}
+
+static int findDeviceIndexById(const String& devId)
+{
+    for (size_t i = 0; i < activeDevices.size(); i++)
+    {
+        if (activeDevices[i].id == devId)
+        {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
 String makePrefKey(const String& devId, const String& sensorName)
 {
     String key = "m_" + devId + "_" + sensorName;
-    if (key.length() > 15) key = key.substring(0, 15);
+    if (key.length() > 15)
+    {
+        key = key.substring(0, 15);
+    }
     return key;
 }
 
 bool addSensorDataToDevice(DeviceStream& dev, const String& name, float value)
 {
     int foundIdx = -1;
-    for (int i = 0; i < dev.sensors.size(); i++)
+    for (int i = 0; i < (int)dev.sensors.size(); i++)
     {
         if (dev.sensors[i].name == name)
         {
@@ -93,33 +186,36 @@ bool addSensorDataToDevice(DeviceStream& dev, const String& name, float value)
             break;
         }
     }
-    
+
     if (foundIdx == -1)
     {
         SensorStream newSensor(name);
-        float savedMax = preferences.getFloat(makePrefKey(dev.id, name).c_str(), -9999.0f);
-        if (savedMax != -9999.0f)
+        float savedMax = preferences.getFloat(makePrefKey(dev.id, name).c_str(), kPrefsNoMax);
+        if (savedMax != kPrefsNoMax)
         {
             newSensor.hasMax = true;
             newSensor.maxThreshold = savedMax;
         }
         dev.sensors.push_back(newSensor);
-        foundIdx = dev.sensors.size() - 1;
+        foundIdx = (int)dev.sensors.size() - 1;
         Serial.printf("[NEW SENSOR] %s for device %s\n", name.c_str(), dev.id.c_str());
     }
-    
+
     SensorStream& sen = dev.sensors[foundIdx];
     sen.values[dev.historyIndex] = value;
-    
-    if (!sen.hasMax) return false;
 
-    bool breached = (value > sen.maxThreshold);
+    if (!sen.hasMax)
+    {
+        return false;
+    }
+
+    const bool breached = (value > sen.maxThreshold);
     if (breached)
     {
         if (!sen.alarmLatched && sen.resetPending)
         {
-            Serial.printf("[ALARM TRIGGER] %s on %s | Value: %.2f > Max: %.2f\n", 
-                         name.c_str(), dev.id.c_str(), value, sen.maxThreshold);
+            Serial.printf("[ALARM TRIGGER] %s on %s | Value: %.2f > Max: %.2f\n", name.c_str(), dev.id.c_str(), value,
+                          sen.maxThreshold);
             sen.alarmLatched = true;
             sen.resetPending = false;
             return true;
@@ -139,14 +235,13 @@ bool addSensorDataToDevice(DeviceStream& dev, const String& name, float value)
 
 void updateDeviceAlarmState(DeviceStream& dev)
 {
-    // FIX: Respect the mute timer. If the device is muted, force the UI alarm to stay OFF!
     if (millis() < dev.alarmMutedUntil)
     {
         dev.alarmActive = false;
         return;
     }
 
-    bool wasActive = dev.alarmActive;
+    const bool wasActive = dev.alarmActive;
     dev.alarmActive = false;
     for (auto& s : dev.sensors)
     {
@@ -162,21 +257,11 @@ void updateDeviceAlarmState(DeviceStream& dev)
     }
 }
 
-void rebuildCaches();
-
 void processIncomingMessage(const ClientMessage& msg, const String& ip)
 {
     Serial.printf("[DATA] Received from device %s | IP: %s\n", String(msg.device_id).c_str(), ip.c_str());
-    String devId = String(msg.device_id);
-    int devIdx = -1;
-    for (int i = 0; i < activeDevices.size(); i++)
-    {
-        if (activeDevices[i].id == devId)
-        {
-            devIdx = i;
-            break;
-        }
-    }
+    const String devId = String(msg.device_id);
+    int devIdx = findDeviceIndexById(devId);
 
     if (devIdx == -1)
     {
@@ -185,17 +270,17 @@ void processIncomingMessage(const ClientMessage& msg, const String& ip)
         newDev.ip = ip;
         newDev.updateDelay = preferences.getInt(("d_" + devId).c_str(), 5000);
         activeDevices.push_back(newDev);
-        devIdx = activeDevices.size() - 1;
+        devIdx = (int)activeDevices.size() - 1;
         Serial.printf("[NEW DEVICE] Registered: %s\n", devId.c_str());
     }
-    
-    DeviceStream& dev = activeDevices[devIdx];
+
+    DeviceStream& dev = activeDevices[(size_t)devIdx];
     dev.ip = ip;
     dev.lastSeen = millis();
 
     for (auto& s : dev.sensors)
     {
-        s.values[dev.historyIndex] = -999.0f;
+        s.values[dev.historyIndex] = kNoReading;
     }
 
     bool triggerAlarm = false;
@@ -207,7 +292,7 @@ void processIncomingMessage(const ClientMessage& msg, const String& ip)
 
     if (triggerAlarm && millis() > dev.alarmMutedUntil)
     {
-        if (millis() - lastAlarmTime > ALARM_COOLDOWN)
+        if (millis() - lastAlarmTime > kAlarmCooldownMs)
         {
             Serial.println("**************************************************");
             Serial.printf("*** ALARM SOUNDING - Device %s ***\n", dev.id.c_str());
@@ -221,46 +306,64 @@ void processIncomingMessage(const ClientMessage& msg, const String& ip)
 
     dev.timeHistory[dev.historyIndex] = String(dev.historyCount + 1);
     dev.historyIndex = (dev.historyIndex + 1) % MAX_HISTORY;
-    if (dev.historyCount < MAX_HISTORY) dev.historyCount++;
+    if (dev.historyCount < MAX_HISTORY)
+    {
+        dev.historyCount++;
+    }
     lastReceivedData = "ID:" + devId + " T:" + String(msg.temp, 1) + " pH:" + String(msg.ph_level, 1);
-    
-    rebuildCaches();
+
+    s_historyJsonDirty = true;
 }
 
 void rebuildCaches()
 {
     String json;
     json.reserve(8192);
-    
+
     json = "{\"devices\":[";
     for (size_t d = 0; d < activeDevices.size(); d++)
     {
-        if (d > 0) json += ",";
+        if (d > 0)
+        {
+            json += ",";
+        }
         DeviceStream& dev = activeDevices[d];
-        
+
         json += "{\"id\":\"" + dev.id + "\",\"ip\":\"" + dev.ip + "\",\"delay\":" + String(dev.updateDelay) +
                 ",\"alarm\":" + (dev.alarmActive ? "true" : "false") + ",\"labels\":[";
-        int start = (dev.historyCount < MAX_HISTORY) ? 0 : dev.historyIndex;
+        const int start = (dev.historyCount < MAX_HISTORY) ? 0 : dev.historyIndex;
         for (int i = 0; i < dev.historyCount; i++)
         {
-            if (i > 0) json += ",";
+            if (i > 0)
+            {
+                json += ",";
+            }
             json += dev.timeHistory[(start + i) % MAX_HISTORY];
         }
         json += "],\"sensors\":[";
         for (size_t s = 0; s < dev.sensors.size(); s++)
         {
-            if (s > 0) json += ",";
+            if (s > 0)
+            {
+                json += ",";
+            }
             SensorStream& sen = dev.sensors[s];
             json += "{\"name\":\"" + sen.name + "\"";
-            if (sen.hasMax) json += ",\"max\":" + String(sen.maxThreshold, 1);
+            if (sen.hasMax)
+            {
+                json += ",\"max\":" + String(sen.maxThreshold, 1);
+            }
             json += ",\"data\":[";
-            
-            int startIdx = (dev.historyCount < MAX_HISTORY) ? 0 : dev.historyIndex;
+
+            const int startIdx = (dev.historyCount < MAX_HISTORY) ? 0 : dev.historyIndex;
             for (int i = 0; i < dev.historyCount; i++)
             {
-                if (i > 0) json += ",";
-                float v = sen.values[(startIdx + i) % MAX_HISTORY];
-                json += (v <= -999.0f ? "null" : String(v, 1));
+                if (i > 0)
+                {
+                    json += ",";
+                }
+                const float v = sen.values[(startIdx + i) % MAX_HISTORY];
+                json += (v <= kNoReading ? "null" : String(v, 1));
             }
             json += "]}";
         }
@@ -268,25 +371,30 @@ void rebuildCaches()
     }
     json += "]}";
     cachedHistoryJSON = json;
-    cachedStatusJSON = "{\"lastData\":\"" + lastReceivedData + "\",\"lastIP\":\"" + lastClientIP + "\"}";
     rebuildIndex();
 }
 
 void cleanupInactiveDevices()
 {
-    unsigned long now = millis();
+    const unsigned long now = millis();
     bool changed = false;
-    for (int i = 0; i < activeDevices.size(); )
+    for (int i = 0; i < (int)activeDevices.size();)
     {
-        if (now - activeDevices[i].lastSeen > 30000)
+        if ((unsigned long)(now - activeDevices[(size_t)i].lastSeen) > kDeviceIdleTimeoutMs)
         {
-            Serial.printf("[TIMEOUT] Device %s removed\n", activeDevices[i].id.c_str());
+            Serial.printf("[TIMEOUT] Device %s removed\n", activeDevices[(size_t)i].id.c_str());
             activeDevices.erase(activeDevices.begin() + i);
             changed = true;
         }
-        else i++;
+        else
+        {
+            i++;
+        }
     }
-    if (changed) rebuildCaches();
+    if (changed)
+    {
+        rebuildCaches();
+    }
 }
 
 void rebuildIndex()
@@ -296,6 +404,154 @@ void rebuildIndex()
     page.replace("%STA_IP%", (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : WiFi.softAPIP().toString());
     cachedIndexHTML = page;
 }
+
+// -----------------------------------------------------------------------------
+// HTTP handlers (Allman)
+
+static void onHttpRoot(AsyncWebServerRequest* request)
+{
+    request->send(200, "text/html", cachedIndexHTML);
+}
+
+static void onHttpSetup(AsyncWebServerRequest* request)
+{
+    request->send_P(200, "text/html", setup_html);
+}
+
+static void onHttpHistory(AsyncWebServerRequest* request)
+{
+    request->send(200, "application/json", cachedHistoryJSON);
+}
+
+static void onHttpSetMax(AsyncWebServerRequest* request)
+{
+    if (!request->hasParam("dev") || !request->hasParam("sensor") || !request->hasParam("val"))
+    {
+        request->send(400, "text/plain", "Missing dev, sensor, or val");
+        return;
+    }
+
+    const String devId = request->getParam("dev")->value();
+    const String sensorName = request->getParam("sensor")->value();
+    const String valStr = request->getParam("val")->value();
+
+    for (auto& dev : activeDevices)
+    {
+        if (dev.id != devId)
+        {
+            continue;
+        }
+        dev.alarmMutedUntil = 0;
+        for (auto& sen : dev.sensors)
+        {
+            if (sen.name != sensorName)
+            {
+                continue;
+            }
+            if (valStr.length() == 0)
+            {
+                sen.hasMax = false;
+            }
+            else
+            {
+                sen.hasMax = true;
+                sen.maxThreshold = valStr.toFloat();
+            }
+            break;
+        }
+        break;
+    }
+
+    const String prefKey = makePrefKey(devId, sensorName);
+    if (valStr.length() == 0)
+    {
+        preferences.remove(prefKey.c_str());
+    }
+    else
+    {
+        preferences.putFloat(prefKey.c_str(), valStr.toFloat());
+    }
+    needsRebuild = true;
+    request->send(200, "text/plain", "Threshold Saved");
+}
+
+static void onHttpSetDelay(AsyncWebServerRequest* request)
+{
+    if (!request->hasParam("dev") || !request->hasParam("delay"))
+    {
+        request->send(400, "text/plain", "Missing dev or delay");
+        return;
+    }
+
+    const String devId = request->getParam("dev")->value();
+    const int newDelay = request->getParam("delay")->value().toInt();
+    for (auto& dev : activeDevices)
+    {
+        if (dev.id == devId)
+        {
+            dev.updateDelay = newDelay;
+        }
+    }
+    preferences.putInt(("d_" + devId).c_str(), newDelay);
+    needsRebuild = true;
+    request->send(200, "text/plain", "Delay Saved");
+}
+
+static void onHttpClearAlarm(AsyncWebServerRequest* request)
+{
+    if (!request->hasParam("dev"))
+    {
+        request->send(400, "text/plain", "Missing dev");
+        return;
+    }
+
+    const String devId = request->getParam("dev")->value();
+    Serial.printf("[UI] Clear alarm requested for %s\n", devId.c_str());
+    for (auto& dev : activeDevices)
+    {
+        if (dev.id != devId)
+        {
+            continue;
+        }
+        dev.alarmActive = false;
+        dev.alarmMutedUntil = millis() + kAlarmMuteAfterClearMs;
+        for (auto& sen : dev.sensors)
+        {
+            sen.alarmLatched = false;
+            sen.resetPending = true;
+        }
+        break;
+    }
+    needsRebuild = true;
+    request->send(200, "text/plain", "Alarm Cleared");
+}
+
+static void onHttpSave(AsyncWebServerRequest* request)
+{
+    if (!request->hasParam("ssid"))
+    {
+        request->send(400, "text/plain", "Missing ssid");
+        return;
+    }
+    pendingSsid = request->getParam("ssid")->value();
+    pendingPass = request->hasParam("pass") ? request->getParam("pass")->value() : "";
+    pendingSave = true;
+    request->send(200, "text/plain", "Saved. Rebooting...");
+}
+
+static void onHttpNotFound(AsyncWebServerRequest* request)
+{
+    if (request->client()->localIP() == WiFi.softAPIP())
+    {
+        request->redirect("/setup");
+    }
+    else
+    {
+        request->send(404, "text/plain", "Not Found");
+    }
+}
+
+// -----------------------------------------------------------------------------
 
 void setup()
 {
@@ -314,20 +570,26 @@ void setup()
         Serial.println("DFPlayer failed to initialize");
     }
 
-    preferences.begin("wifi-gate", false);
-    if (RESET_PREFERENCES_ON_BOOT) preferences.clear();
+    preferences.begin(PREFS_NAMESPACE, false);
+    if (RESET_PREFERENCES_ON_BOOT)
+    {
+        preferences.clear();
+    }
 
     ssid = preferences.getString("ssid", "");
     pass = preferences.getString("pass", "");
 
     WiFi.mode(WIFI_AP_STA);
-    WiFi.softAP("SmartPlant-Gateway", "12345678");
-    Serial.printf("AP Started → SSID: SmartPlant-Gateway | IP: %s\n", WiFi.softAPIP().toString().c_str());
+    WiFi.softAP(AP_SSID);
+    Serial.printf("AP started — SSID: %s | IP: %s\n", AP_SSID, WiFi.softAPIP().toString().c_str());
 
+    dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
+    dnsServer.setTTL(300);
     dnsServer.start(53, "*", WiFi.softAPIP());
-    Serial.println("DNS Server started (captive portal)");
+    Serial.println("DNS server started (captive portal)");
 
     server.begin();
+
     if (ssid != "")
     {
         Serial.printf("Connecting to saved WiFi: %s\n", ssid.c_str());
@@ -336,103 +598,39 @@ void setup()
 
     rebuildIndex();
 
-    // Web Routes
-    webServer.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-        request->send(200, "text/html", cachedIndexHTML);
-    });
-    webServer.on("/setup", HTTP_GET, [](AsyncWebServerRequest *request) {
-        request->send_P(200, "text/html", setup_html);
-    });
-    webServer.on("/history", HTTP_GET, [](AsyncWebServerRequest *request) {
-        request->send(200, "application/json", cachedHistoryJSON);
-    });
-    webServer.on("/set_max", HTTP_GET, [](AsyncWebServerRequest *request) {
-        if (request->hasParam("dev") && request->hasParam("sensor") && request->hasParam("val")) {
-            String devId = request->getParam("dev")->value();
-            String sensorName = request->getParam("sensor")->value();
-            String valStr = request->getParam("val")->value();
-            for (auto& dev : activeDevices) {
-                if (dev.id == devId) 
-                {
-                    dev.alarmMutedUntil = 0;
-                    for (auto& sen : dev.sensors) {
-                        if (sen.name == sensorName) {
-                            if (valStr.length() == 0) sen.hasMax = false;
-                            else { sen.hasMax = true; sen.maxThreshold = valStr.toFloat(); }
-                            break;
-                        }
-                    }
-                    break;
-                }
-            }
-            String prefKey = makePrefKey(devId, sensorName);
-            if (valStr.length() == 0) preferences.remove(prefKey.c_str());
-            else preferences.putFloat(prefKey.c_str(), valStr.toFloat());
-            needsRebuild = true;
-            request->send(200, "text/plain", "Threshold Saved");
-        }
-    });
-    webServer.on("/set_delay", HTTP_GET, [](AsyncWebServerRequest *request) {
-        if (request->hasParam("dev") && request->hasParam("delay")) {
-            String devId = request->getParam("dev")->value();
-            int newDelay = request->getParam("delay")->value().toInt();
-            for (auto& dev : activeDevices) {
-                if (dev.id == devId) dev.updateDelay = newDelay;
-            }
-            preferences.putInt(("d_" + devId).c_str(), newDelay);
-            needsRebuild = true;
-            request->send(200, "text/plain", "Delay Saved");
-        }
-    });
-    webServer.on("/clear_alarm", HTTP_GET, [](AsyncWebServerRequest *request) {
-        if (request->hasParam("dev")) {
-            String devId = request->getParam("dev")->value();
-            Serial.printf("[UI] Clear alarm requested for %s\n", devId.c_str());
-            for (auto& dev : activeDevices) {
-                if (dev.id == devId) {
-                    dev.alarmActive = false;
-                    dev.alarmMutedUntil = millis() + 60000;
-                    for (auto& sen : dev.sensors) {
-                        sen.alarmLatched = false;
-                        sen.resetPending = true;
-                    }
-                    break;
-                }
-            }
-            needsRebuild = true;
-            request->send(200, "text/plain", "Alarm Cleared");
-        }
-    });
-    webServer.on("/save", HTTP_GET, [](AsyncWebServerRequest *request) {
-        if (request->hasParam("ssid")) {
-            pendingSsid = request->getParam("ssid")->value();
-            pendingPass = request->hasParam("pass") ? request->getParam("pass")->value() : "";
-            pendingSave = true;
-            request->send(200, "text/plain", "Saved. Rebooting...");
-        }
-    });
-    webServer.onNotFound([](AsyncWebServerRequest *request) {
-        if (request->client()->localIP() == WiFi.softAPIP()) request->redirect("/setup");
-        else request->send(404, "text/plain", "Not Found");
-    });
+    webServer.on("/", HTTP_GET, onHttpRoot);
+    webServer.on("/setup", HTTP_GET, onHttpSetup);
+    webServer.on("/history", HTTP_GET, onHttpHistory);
+    webServer.on("/set_max", HTTP_GET, onHttpSetMax);
+    webServer.on("/set_delay", HTTP_GET, onHttpSetDelay);
+    webServer.on("/clear_alarm", HTTP_GET, onHttpClearAlarm);
+    webServer.on("/save", HTTP_GET, onHttpSave);
+    webServer.onNotFound(onHttpNotFound);
     webServer.begin();
-    Serial.println("=== Web Server Started - Gateway Ready ===");
-}
 
-unsigned long lastIndexRebuild = 0;
-unsigned long lastWifiCheck = 0;
-unsigned long lastCleanup = 0;
+    Serial.println("=== Web server started — gateway ready ===");
+}
 
 void loop()
 {
+    updateMdnsForSta();
     dnsServer.processNextRequest();
+
     if (needsRebuild)
     {
         rebuildCaches();
         needsRebuild = false;
+        s_historyJsonDirty = false;
+        s_lastHistoryJsonRebuildMs = millis();
     }
-    
-    if (ssid != "" && WiFi.status() != WL_CONNECTED && millis() - lastWifiCheck > 10000)
+    else if (s_historyJsonDirty && (millis() - s_lastHistoryJsonRebuildMs >= kHistoryJsonRebuildMinMs))
+    {
+        rebuildCaches();
+        s_historyJsonDirty = false;
+        s_lastHistoryJsonRebuildMs = millis();
+    }
+
+    if (ssid != "" && WiFi.status() != WL_CONNECTED && millis() - lastWifiCheck > kWifiReconnectIntervalMs)
     {
         WiFi.begin(ssid.c_str(), pass.c_str());
         lastWifiCheck = millis();
@@ -447,13 +645,13 @@ void loop()
         ESP.restart();
     }
 
-    if (millis() - lastIndexRebuild > 10000)
+    if (millis() - lastIndexRebuild > kIndexRebuildIntervalMs)
     {
         rebuildIndex();
         lastIndexRebuild = millis();
     }
 
-    if (millis() - lastCleanup > 5000)
+    if (millis() - lastCleanup > kCleanupIntervalMs)
     {
         cleanupInactiveDevices();
         lastCleanup = millis();
@@ -465,12 +663,14 @@ void loop()
     {
         lastClientIP = remoteIP;
         processIncomingMessage(incomingMsg, remoteIP);
+
         uint32_t targetDelay = 5000;
+        const String id = String(incomingMsg.device_id);
         for (auto& dev : activeDevices)
         {
-            if (dev.id == String(incomingMsg.device_id))
+            if (dev.id == id)
             {
-                targetDelay = dev.updateDelay;
+                targetDelay = (uint32_t)dev.updateDelay;
                 break;
             }
         }

@@ -1,22 +1,21 @@
 #include "LServer.h"
 
-void Lserver::begin() {   
-    WiFi.softAP("Smart-Plant"); 
+void Lserver::begin()
+{
+    // WiFi / softAP must be started by the sketch before this (e.g. Server.ino).
     _udp.begin(_port);
-    Serial.print("UDP Server started on IP: ");
+    Serial.print("UDP listening, AP IP: ");
     Serial.print(WiFi.softAPIP());
-    Serial.print(" Port: ");
+    Serial.print(" port ");
     Serial.println(_port);
 }
 
-bool Lserver::receivePacket(ClientMessage &msgOut, String &fromIP) 
+bool Lserver::receivePacket(ClientMessage &msgOut, String &fromIP)
 {
-    
     int packetSize = _udp.parsePacket();
 
     if (packetSize == sizeof(ClientMessage))
     {
-        
         _lastSenderIP = _udp.remoteIP();
         _lastSenderPort = _udp.remotePort();
         fromIP = _lastSenderIP.toString();
@@ -28,7 +27,7 @@ bool Lserver::receivePacket(ClientMessage &msgOut, String &fromIP)
     return false;
 }
 
-bool Lserver::sendUpdate(uint32_t newDelay) 
+bool Lserver::sendUpdate(uint32_t newDelay)
 {
     if (_lastSenderIP[0] == 0) return false; // No one to reply to
 

@@ -7,7 +7,7 @@ Lclient::Lclient(const char* serverIP, int port)
 }
 
 void Lclient::begin() {
-    WiFi.begin("Smart-Plant");
+    WiFi.begin("SmartPlant");
     while (WiFi.status() != WL_CONNECTED) 
     {
         delay(500);

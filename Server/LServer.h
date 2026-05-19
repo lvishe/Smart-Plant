@@ -16,7 +16,8 @@ private:
 
 public:
     Lserver(int port = 8080) : _port(port) {}
-    
+
+    /** Start UDP; call only after the sketch has configured WiFi (e.g. softAP/STA). */
     void begin();
     // Returns true if a valid packet was received
     bool receivePacket(ClientMessage &msgOut, String &fromIP);

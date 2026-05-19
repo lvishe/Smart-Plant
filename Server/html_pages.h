@@ -103,6 +103,13 @@ var PALETTE = ["#00ffcc","#00c6ff","#ff6b6b","#ffd166","#a29bfe"];
 var myChart = null;
 var activeDeviceId = null;
 var modalOpen = false;
+var modalUiBuiltFor = null;
+
+function latestFromSeries(data) {
+    if (!data || !data.length) return null;
+    var v = data[data.length - 1];
+    return (v === null || v === undefined) ? null : v;
+}
 
 function renderCubes() {
     const container = document.getElementById("cubes-container");
@@ -120,12 +127,12 @@ function renderCubes() {
         const cube = document.createElement("div");
         cube.className = `cube ${dev.alarm ? "alarm-active" : ""}`;
         cube.onclick = () => openModal(dev.id);
-        
+
         let html = `<h3>Device ${dev.id}</h3><div class="cube-summary">`;
         dev.sensors.forEach(s => {
-            const latest = s.data ? s.data[s.data.length-1] : null;
+            const latest = s.data ? s.data[s.data.length - 1] : null;
             const valStr = (latest !== null) ? latest.toFixed(1) : "--";
-            const warn = (s.max && latest > s.max) ? "warning" : "";
+            const warn = (s.max && latest !== null && latest > s.max) ? "warning" : "";
             html += `<div>${s.name}: <span class="${warn}">${valStr}</span>`;
             if (s.max) html += ` <span style="font-size:10px;opacity:0.6;">(Max:${s.max})</span>`;
             html += `</div>`;
@@ -145,66 +152,126 @@ function openModal(devId) {
     document.getElementById("device-modal").style.display = "block";
 }
 
+function buildDelayControls(device) {
+    const delayDiv = document.getElementById("device-delay-container");
+    delayDiv.innerHTML = "";
+    const wrap = document.createElement("div");
+    wrap.className = "setting-row";
+    const left = document.createElement("div");
+    const strong = document.createElement("strong");
+    strong.textContent = "Update Rate (ms)";
+    const cur = document.createElement("div");
+    cur.id = "current_delay";
+    cur.style.cssText = "font-size:12px;opacity:0.7;margin-top:4px;";
+    left.appendChild(strong);
+    left.appendChild(cur);
+    const right = document.createElement("div");
+    const input = document.createElement("input");
+    input.type = "number";
+    input.id = "delay_input";
+    input.step = "500";
+    input.min = "1000";
+    input.placeholder = "New Rate";
+    input.style.width = "90px";
+    const btn = document.createElement("button");
+    btn.className = "action-btn";
+    btn.textContent = "Set";
+    btn.onclick = function () { saveDelay(activeDeviceId); };
+    right.appendChild(input);
+    right.appendChild(btn);
+    wrap.appendChild(left);
+    wrap.appendChild(right);
+    delayDiv.appendChild(wrap);
+    cur.textContent = "(Current: " + (device.delay || 5000) + "ms)";
+}
+
+function buildSensorRows(device) {
+    const settingsDiv = document.getElementById("sensor-settings");
+    settingsDiv.innerHTML = "";
+    device.sensors.forEach(function (s, idx) {
+        const row = document.createElement("div");
+        row.className = "setting-row";
+        const left = document.createElement("div");
+        const nameEl = document.createElement("strong");
+        nameEl.textContent = s.name;
+        const valSpan = document.createElement("span");
+        valSpan.id = "val_" + idx;
+        valSpan.style.marginLeft = "6px";
+        const curMax = document.createElement("div");
+        curMax.id = "cur_max_" + idx;
+        curMax.style.cssText = "font-size:12px;opacity:0.7;margin-top:4px;";
+        left.appendChild(nameEl);
+        left.appendChild(document.createTextNode(" "));
+        left.appendChild(valSpan);
+        left.appendChild(curMax);
+        const right = document.createElement("div");
+        const input = document.createElement("input");
+        input.type = "number";
+        input.id = "max_" + idx;
+        input.step = "0.1";
+        input.placeholder = "New Max";
+        input.style.width = "90px";
+        const btn = document.createElement("button");
+        btn.className = "action-btn";
+        btn.textContent = "Save";
+        btn.onclick = function () { saveThreshold(activeDeviceId, idx); };
+        right.appendChild(input);
+        right.appendChild(btn);
+        row.appendChild(left);
+        row.appendChild(right);
+        settingsDiv.appendChild(row);
+    });
+}
+
 function updateModalContent() {
     const device = systemData.devices.find(d => d.id === activeDeviceId);
-    if (!device) return;
+    if (!device) {
+        if (modalOpen) closeModal();
+        return;
+    }
+
+    if (modalUiBuiltFor !== activeDeviceId) {
+        modalUiBuiltFor = activeDeviceId;
+        if (myChart) { myChart.destroy(); myChart = null; }
+        buildDelayControls(device);
+        buildSensorRows(device);
+    } else {
+        const settingsDiv = document.getElementById("sensor-settings");
+        if (settingsDiv.children.length !== device.sensors.length) {
+            if (myChart) { myChart.destroy(); myChart = null; }
+            buildSensorRows(device);
+        }
+    }
 
     document.getElementById("modal-title").textContent = "Device " + device.id;
     document.getElementById("modal-ip").textContent = "IP: " + (device.ip || "Unknown");
 
     const alarmDiv = document.getElementById("alarm-controls");
-    alarmDiv.innerHTML = device.alarm ? 
-        `<button class="action-btn" style="background:#ff4757;width:100%;padding:14px;font-size:17px;" onclick="clearAlarm('${activeDeviceId}')"> Turn Off Alarm </button>` : "";
-
-    // Delay Input Setup (Empty Box + Current Text)
-    let delayDiv = document.getElementById("device-delay-container");
-    if (!document.getElementById("delay_input")) {
-        delayDiv.innerHTML = `
-            <div class="setting-row">
-                <div>
-                    <strong>Update Rate (ms)</strong>
-                    <div style="font-size:12px;opacity:0.7;margin-top:4px;" id="current_delay"></div>
-                </div>
-                <div>
-                    <input type="number" id="delay_input" step="500" min="1000" placeholder="New Rate" style="width:90px;">
-                    <button class="action-btn" onclick="saveDelay('${activeDeviceId}')">Set</button>
-                </div>
-            </div>`;
-    }
-    document.getElementById("current_delay").textContent = "(Current: " + (device.delay || 5000) + "ms)";
-
-    // Thresholds Inputs Setup (Empty Boxes + Current Text)
-    const settingsDiv = document.getElementById("sensor-settings");
-    if (settingsDiv.children.length !== device.sensors.length) {
-        settingsDiv.innerHTML = "";
-        device.sensors.forEach(s => {
-            const row = document.createElement("div");
-            row.className = "setting-row";
-            row.innerHTML = `
-                <div>
-                    <strong>${s.name}</strong> <span id="val_${s.name}"></span>
-                    <div style="font-size:12px;opacity:0.7;margin-top:4px;" id="cur_max_${s.name}"></div>
-                </div>
-                <div>
-                    <input type="number" id="max_${s.name}" step="0.1" placeholder="New Max" style="width:90px;">
-                    <button class="action-btn" onclick="saveThreshold('${activeDeviceId}', '${s.name}')">Save</button>
-                </div>`;
-            settingsDiv.appendChild(row);
-        });
+    alarmDiv.innerHTML = "";
+    if (device.alarm) {
+        const btn = document.createElement("button");
+        btn.className = "action-btn";
+        btn.style.cssText = "background:#ff4757;width:100%;padding:14px;font-size:17px;";
+        btn.textContent = "Turn Off Alarm";
+        btn.onclick = function () { clearAlarm(activeDeviceId); };
+        alarmDiv.appendChild(btn);
     }
 
-    // Update real-time values ONLY. Never overwrite the input boxes!
-    device.sensors.forEach(s => {
-        const latest = s.data ? s.data[s.data.length-1] || 0 : 0;
-        const valEl = document.getElementById(`val_${s.name}`);
+    const curDelayEl = document.getElementById("current_delay");
+    if (curDelayEl) {
+        curDelayEl.textContent = "(Current: " + (device.delay || 5000) + "ms)";
+    }
+
+    device.sensors.forEach(function (s, idx) {
+        const latest = latestFromSeries(s.data);
+        const valEl = document.getElementById("val_" + idx);
         if (valEl) {
-            valEl.textContent = latest.toFixed(1);
-            valEl.style.color = (s.max && latest > s.max) ? '#ff6b6b' : '#00ffcc';
+            valEl.textContent = (latest !== null) ? latest.toFixed(1) : "--";
+            valEl.style.color = (s.max && latest !== null && latest > s.max) ? "#ff6b6b" : "#00ffcc";
         }
-        
-        const curMaxEl = document.getElementById(`cur_max_${s.name}`);
+        const curMaxEl = document.getElementById("cur_max_" + idx);
         if (curMaxEl) {
-            curMaxEl.textContent = s.max ? `(Current Max: ${s.max})` : "(No Max Set)";
+            curMaxEl.textContent = s.max ? ("(Current Max: " + s.max + ")") : "(No Max Set)";
         }
     });
 
@@ -212,6 +279,10 @@ function updateModalContent() {
 }
 
 function updateChart(device) {
+    if (myChart && myChart.data.datasets.length !== device.sensors.length) {
+        myChart.destroy();
+        myChart = null;
+    }
     if (!myChart) {
         const ctx = document.getElementById("deviceChart").getContext("2d");
         const datasets = device.sensors.map((sensor, i) => ({
@@ -241,39 +312,45 @@ function updateChart(device) {
         device.sensors.forEach((sensor, i) => {
             if (myChart.data.datasets[i]) myChart.data.datasets[i].data = sensor.data || [];
         });
-        myChart.update('none');
+        myChart.update("none");
     }
 }
 
 function closeModal() {
     modalOpen = false;
+    modalUiBuiltFor = null;
     document.getElementById("device-modal").style.display = "none";
     if (myChart) { myChart.destroy(); myChart = null; }
 }
 
 function clearAlarm(devId) {
-    fetch(`/clear_alarm?dev=${devId}`).then(() => setTimeout(poll, 300));
+    fetch("/clear_alarm?dev=" + encodeURIComponent(devId)).then(function () { setTimeout(poll, 300); });
 }
 
 function saveDelay(devId) {
     const inputEl = document.getElementById("delay_input");
     const val = inputEl.value;
-    if(val) {
-        fetch(`/set_delay?dev=${devId}&delay=${val}`).then(() => { 
-            alert("Update rate saved!"); 
-            inputEl.value = ""; // Clear input box after saving
-            poll(); 
+    if (val) {
+        fetch("/set_delay?dev=" + encodeURIComponent(devId) + "&delay=" + encodeURIComponent(val)).then(function () {
+            alert("Update rate saved!");
+            inputEl.value = "";
+            poll();
         });
     }
 }
 
-function saveThreshold(devId, sensor) {
-    const inputEl = document.getElementById(`max_${sensor}`);
+function saveThreshold(devId, sensorIndex) {
+    const dev = systemData.devices.find(function (d) { return d.id === devId; });
+    if (!dev || !dev.sensors[sensorIndex]) return;
+    const sensor = dev.sensors[sensorIndex];
+    const inputEl = document.getElementById("max_" + sensorIndex);
     const val = inputEl.value;
-    fetch(`/set_max?dev=${devId}&sensor=${sensor}&val=${val}`).then(() => { 
-        alert("Threshold saved!"); 
-        inputEl.value = ""; // Clear input box after saving
-        poll(); 
+    fetch("/set_max?dev=" + encodeURIComponent(devId) +
+        "&sensor=" + encodeURIComponent(sensor.name) +
+        "&val=" + encodeURIComponent(val)).then(function () {
+        alert("Threshold saved!");
+        inputEl.value = "";
+        poll();
     });
 }
 
