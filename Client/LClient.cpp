@@ -6,7 +6,8 @@ Lclient::Lclient(const char* serverIP, int port)
     _port = port;
 }
 
-void Lclient::begin() {
+void Lclient::begin() 
+{
     WiFi.begin("SmartPlant");
     while (WiFi.status() != WL_CONNECTED) 
     {

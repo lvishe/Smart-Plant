@@ -7,7 +7,7 @@ enum class MessageType : uint8_t
 {
     SetDelay = 0,
     SetThresholds = 1,
-    Reboot = 2
+    Reboot = 2,
 };
 
 struct __attribute__((packed)) ServerMessage 
